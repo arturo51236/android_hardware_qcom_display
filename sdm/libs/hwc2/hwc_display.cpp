@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2021, The Linux Foundation. All rights reserved.
  * Not a Contribution.
  *
  * Copyright 2015 The Android Open Source Project
@@ -41,10 +41,6 @@
 #include "hwc_debugger.h"
 #include "blit_engine_c2d.h"
 #include "hwc_tonemapper.h"
-
-#ifndef USE_GRALLOC1
-#include <gr.h>
-#endif
 
 #ifdef QTI_BSP
 #include <hardware/display_defs.h>
@@ -513,11 +509,7 @@ void HWCDisplay::BuildLayerStack() {
     const private_handle_t *handle =
         reinterpret_cast<const private_handle_t *>(layer->input_buffer.buffer_id);
     if (handle) {
-#ifdef USE_GRALLOC1
       if (handle->buffer_type == BUFFER_TYPE_VIDEO) {
-#else
-      if (handle->bufferType == BUFFER_TYPE_VIDEO) {
-#endif
         layer_stack_.flags.video_present = true;
       }
       // TZ Protected Buffer - L1
@@ -720,6 +712,9 @@ HWC2::Error HWCDisplay::SetPowerMode(HWC2::PowerMode mode) {
       // Do not flush until a buffer is successfully submitted again.
       flush_on_error = false;
       state = kStateOff;
+      if (!reset_panel_) {
+        last_power_mode_ = HWC2::PowerMode::Off;
+      }
       if (tone_mapper_) {
         tone_mapper_->Terminate();
       }
@@ -906,8 +901,7 @@ HWC2::Error HWCDisplay::SetClientTarget(buffer_handle_t target, int32_t acquire_
   }
 
   if (acquire_fence == 0) {
-    DLOGE("acquire_fence is zero");
-    return HWC2::Error::BadParameter;
+    DLOGV_IF(kTagClient, "Re-using cached buffer");
   }
 
   client_target_->SetLayerBuffer(target, acquire_fence);
@@ -953,6 +947,10 @@ HWC2::PowerMode HWCDisplay::GetLastPowerMode() {
 }
 
 DisplayError HWCDisplay::VSync(const DisplayEventVSync &vsync) {
+  if (is_primary_) {
+    callbacks_->Vsync(HWC_DISPLAY_PRIMARY, vsync.timestamp);
+    return kErrorNone;
+  }
   callbacks_->Vsync(id_, vsync.timestamp);
   return kErrorNone;
 }
@@ -1636,13 +1634,8 @@ int HWCDisplay::SetFrameBufferResolution(uint32_t x_pixels, uint32_t y_pixels) {
     flags |= private_handle_t::PRIV_FLAGS_UBWC_ALIGNED;
   }
 
-#ifdef USE_GRALLOC1
   buffer_allocator_->GetAlignedWidthAndHeight(INT(x_pixels), INT(y_pixels), format, usage,
                                               &aligned_width, &aligned_height);
-#else
-  AdrenoMemInfo::getInstance().getAlignedWidthAndHeight(INT(x_pixels), INT(y_pixels), format,
-                                                        INT(usage), aligned_width, aligned_height);
-#endif
 
   // TODO(user): How does the dirty region get set on the client target? File bug on Google
   client_target_layer->composition = kCompositionGPUTarget;
@@ -1762,6 +1755,10 @@ HWC2::Error HWCDisplay::SetCursorPosition(hwc2_layer_t layer, int x, int y) {
 }
 
 int HWCDisplay::OnMinHdcpEncryptionLevelChange(uint32_t min_enc_level) {
+  if (min_enc_level_ == min_enc_level) {
+    DLOGI("Min hdcp level not changed!");
+    return 0;
+  }
   DisplayError error = display_intf_->OnMinHdcpEncryptionLevelChange(min_enc_level);
   if (error != kErrorNone) {
     DLOGE("Failed. Error = %d", error);
@@ -1769,6 +1766,7 @@ int HWCDisplay::OnMinHdcpEncryptionLevelChange(uint32_t min_enc_level) {
   }
 
   validated_.reset();
+  min_enc_level_ = min_enc_level;
   return 0;
 }
 
@@ -2075,6 +2073,10 @@ bool HWCDisplay::CanSkipValidate() {
   }
 
   return true;
+}
+
+void HWCDisplay::SetResetPanel(bool reset) {
+  reset_panel_ = reset;
 }
 
 }  // namespace sdm
